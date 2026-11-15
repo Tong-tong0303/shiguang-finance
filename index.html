@@ -130,181 +130,7 @@ input:focus,select:focus,textarea:focus{outline:3px solid rgba(120,136,121,.2);b
 @media(max-width:650px){.budget-item{padding:12px}.budget-item-meta{font-size:.8rem}}
 
 </style>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2">
-/* 電子發票 QR 掃描：支援瀏覽器 BarcodeDetector；若不支援，嘗試使用 jsQR。 */
-let invoiceStream=null,scanFrameRequest=null,scanDetector=null,scanActive=false,lastQrValue='';
-const invoiceToday=()=>new Date().toLocaleDateString('en-CA');
-document.getElementById('invoiceDate').value=invoiceToday();
-function setScanStatus(message){document.getElementById('scanStatus').textContent=message;}
-function applyScannedQr(raw){
-  lastQrValue=String(raw||'').trim();
-  if(!lastQrValue)return;
-  const invoiceNo=lastQrValue.match(/[A-Z]{2}\d{8}/i)?.[0]?.toUpperCase();
-  if(invoiceNo)document.getElementById('invoiceNumber').value=invoiceNo;
-  // 台灣電子發票 QR 可能含民國年月日；只在格式明確時預填日期。
-  const dateMatch=lastQrValue.match(/(?:^|\D)(\d{7})(?:\D|$)/);
-  if(dateMatch){const v=dateMatch[1],y=Number(v.slice(0,3))+1911,m=Number(v.slice(3,5)),d=Number(v.slice(5,7));const dt=new Date(y,m-1,d);if(dt.getFullYear()===y&&dt.getMonth()===m-1&&dt.getDate()===d)document.getElementById('invoiceDate').value=`${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;}
-  document.getElementById('scanRaw').textContent=lastQrValue.length>900?lastQrValue.slice(0,900)+'…（內容過長，僅顯示前 900 字）':lastQrValue;
-  document.getElementById('scanResult').hidden=false;
-  setScanStatus(invoiceNo?`已讀取發票號碼 ${invoiceNo}，請核對日期、店家與金額。`:'已讀取 QR Code，未能辨識發票號碼；請手動確認資料。');
-  stopInvoiceScan();
-}
-async function startInvoiceScan(){
-  const video=document.getElementById('scanVideo'),frame=document.getElementById('scanFrame');
-  if(!navigator.mediaDevices?.getUserMedia){setScanStatus('此瀏覽器無法啟用相機，請改用「上傳 QR Code 圖片」。');return;}
-  try{
-    invoiceStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
-    video.srcObject=invoiceStream;await video.play();frame.classList.add('scanning');scanActive=true;
-    if('BarcodeDetector' in window){try{scanDetector=new BarcodeDetector({formats:['qr_code']});}catch(_){scanDetector=null;}}
-    setScanStatus(scanDetector?'相機已啟動，請將發票 QR Code 對準畫面。':'相機已啟動，正在準備 QR Code 辨識。');
-    const tick=async()=>{if(!scanActive)return;try{if(video.readyState>=2){if(scanDetector){const codes=await scanDetector.detect(video);if(codes.length){applyScannedQr(codes[0].rawValue);return;}}else if(window.jsQR){const canvas=document.createElement('canvas'),ctx=canvas.getContext('2d',{willReadFrequently:true});canvas.width=video.videoWidth;canvas.height=video.videoHeight;ctx.drawImage(video,0,0,canvas.width,canvas.height);const result=window.jsQR(ctx.getImageData(0,0,canvas.width,canvas.height).data,canvas.width,canvas.height,{inversionAttempts:'attemptBoth'});if(result?.data){applyScannedQr(result.data);return;}}}}catch(err){console.warn('QR scan frame:',err);}scanFrameRequest=requestAnimationFrame(tick);};
-    scanFrameRequest=requestAnimationFrame(tick);
-  }catch(err){setScanStatus('無法開啟相機：'+(err?.message||'請確認網站相機權限，或改用上傳圖片。'));stopInvoiceScan();}
-}
-function stopInvoiceScan(){scanActive=false;if(scanFrameRequest)cancelAnimationFrame(scanFrameRequest);scanFrameRequest=null;if(invoiceStream){invoiceStream.getTracks().forEach(t=>t.stop());invoiceStream=null;}const video=document.getElementById('scanVideo');if(video)video.srcObject=null;document.getElementById('scanFrame')?.classList.remove('scanning');}
-async function scanInvoiceImage(event){
-  const file=event.target.files?.[0];if(!file)return;
-  try{const bitmap=await createImageBitmap(file),canvas=document.createElement('canvas'),ctx=canvas.getContext('2d',{willReadFrequently:true});canvas.width=bitmap.width;canvas.height=bitmap.height;ctx.drawImage(bitmap,0,0);let raw='';
-    if('BarcodeDetector' in window){try{const det=new BarcodeDetector({formats:['qr_code']});const codes=await det.detect(canvas);raw=codes[0]?.rawValue||'';}catch(_){}}
-    if(!raw&&window.jsQR){const result=window.jsQR(ctx.getImageData(0,0,canvas.width,canvas.height).data,canvas.width,canvas.height,{inversionAttempts:'attemptBoth'});raw=result?.data||'';}
-    if(raw)applyScannedQr(raw);else setScanStatus('圖片中沒有辨識到 QR Code。請使用清晰、完整的發票 QR Code 圖片。');bitmap.close?.();
-  }catch(err){setScanStatus('圖片讀取失敗：'+(err?.message||'請換一張圖片再試。'));}event.target.value='';
-}
-document.getElementById('invoiceForm').addEventListener('submit',async e=>{
-  e.preventDefault();if(!currentUser){alert('請先登入會員，才能將發票紀錄同步到雲端。');openAuth();return;}
-  const invoiceNo=document.getElementById('invoiceNumber').value.trim().toUpperCase(),date=document.getElementById('invoiceDate').value,store=document.getElementById('invoiceStore').value.trim(),category=document.getElementById('invoiceCategory').value,amount=Number(document.getElementById('invoiceAmount').value);
-  if(!date||!store||!Number.isFinite(amount)||amount<=0){alert('請確認日期、店家與有效金額。');return;}
-  if(invoiceNo&&records.some(r=>String(r.name||'').includes(`[發票:${invoiceNo}]`))){alert('這張發票似乎已經記帳，請勿重複新增。');return;}
-  const note=invoiceNo?`${store} [發票:${invoiceNo}]`:`${store} [掃描發票]`;
-  const payload={user_id:currentUser.id,type:'expense',category,amount,note,transaction_date:date};
-  const {data,error}=await supabaseClient.from('transactions').insert(payload).select().single();
-  if(error){alert('發票記帳失敗：'+error.message);return;}
-  records.unshift({id:data.id,date:data.transaction_date,type:data.type,name:data.note||'',category:data.category||category,amount:Number(data.amount)});renderRecords();renderOverview();renderAnalysis();
-  e.target.reset();document.getElementById('invoiceDate').value=invoiceToday();document.getElementById('scanResult').hidden=true;lastQrValue='';setScanStatus('發票已成功存入雲端記帳！');alert('發票記帳成功，已同步到雲端。');
-});
-
-
-/* 生活預算管理：每位登入會員各自保存一筆預算設定。 */
-const budgetCategories=[
-  {key:'food',name:'食',detail:'餐飲、飲料、食材',emoji:'🍱',color:'#b7a58b',match:['餐飲','飲食','食物','食品','外食','食']},
-  {key:'clothing',name:'衣',detail:'服飾、鞋子、配件',emoji:'👕',color:'#c7a9a1',match:['服飾','衣物','衣','購物']},
-  {key:'housing',name:'住',detail:'房租、水電、生活用品',emoji:'🏠',color:'#91a89a',match:['房租','水電','居家','生活','住']},
-  {key:'transport',name:'行',detail:'交通、油錢、車資',emoji:'🚌',color:'#a3afc0',match:['交通','油錢','行']},
-  {key:'entertainment',name:'娛樂',detail:'休閒、娛樂、旅遊',emoji:'🎮',color:'#b5a8bf',match:['娛樂','休閒','旅遊']}
-];
-let budgetRatios=[25,15,30,10,20];
-let budgetPlanLoaded=false;
-function updateBudgetBaseLabel(){
-  const mode=document.getElementById('budgetMode').value;
-  document.getElementById('budgetBaseLabel').textContent=mode==='income'?'每月收入（新台幣）':'每月可用生活預算（新台幣）';
-  renderBudgetPreview();
-}
-function rebalanceBudget(changedIndex,newValue){
-  const next=budgetRatios.slice();
-  const value=Math.max(0,Math.min(100,Math.round(Number(newValue)||0)));
-  const remaining=100-value;
-  const others=next.map((v,i)=>i===changedIndex?0:v);
-  const otherTotal=others.reduce((a,b)=>a+b,0);
-  next[changedIndex]=value;
-  let assigned=0;
-  const otherIndexes=next.map((_,i)=>i).filter(i=>i!==changedIndex);
-  otherIndexes.forEach((i,pos)=>{
-    let part;
-    if(pos===otherIndexes.length-1) part=remaining-assigned;
-    else if(otherTotal>0) part=Math.floor(remaining*others[i]/otherTotal);
-    else part=Math.floor(remaining/otherIndexes.length);
-    next[i]=part;assigned+=part;
-  });
-  budgetRatios=next;
-  renderBudgetControls();
-  renderBudgetPreview();
-}
-function renderBudgetControls(){
-  const root=document.getElementById('budgetSliders');
-  if(!root)return;
-  root.innerHTML=budgetCategories.map((c,i)=>`<div class="budget-item">
-    <div class="budget-item-head"><strong>${c.emoji} ${c.name}</strong><strong id="budgetPct${i}">${budgetRatios[i]}%</strong></div>
-    <input aria-label="${c.name}預算比例" type="range" min="0" max="100" step="1" value="${budgetRatios[i]}" oninput="rebalanceBudget(${i},this.value)">
-    <div class="budget-item-meta"><span>${c.detail}</span><span id="budgetMoney${i}">$0</span></div>
-  </div>`).join('');
-}
-function getBudgetBase(){
-  const raw=Number(document.getElementById('budgetBase')?.value||0);
-  return Number.isFinite(raw)&&raw>0?raw:0;
-}
-function renderBudgetPreview(){
-  const base=getBudgetBase();
-  const total=budgetRatios.reduce((a,b)=>a+b,0);
-  const totalEl=document.getElementById('budgetTotalPercent');
-  if(!totalEl)return;
-  totalEl.textContent=total+'%';
-  const bar=document.getElementById('budgetBar');
-  bar.innerHTML=budgetCategories.map((c,i)=>`<span title="${c.name} ${budgetRatios[i]}%" style="width:${budgetRatios[i]}%;background:${c.color}"></span>`).join('');
-  document.getElementById('budgetBaseSummary').textContent=money(base);
-  document.getElementById('budgetBreakdown').innerHTML=budgetCategories.map((c,i)=>{
-    const amount=Math.round(base*budgetRatios[i]/100);
-    return `<div class="budget-breakdown-row"><span>${c.emoji} ${c.name}（${budgetRatios[i]}%）</span><strong>${money(amount)}</strong></div>`;
-  }).join('');
-  budgetCategories.forEach((c,i)=>{
-    const pct=document.getElementById('budgetPct'+i),amt=document.getElementById('budgetMoney'+i);
-    if(pct)pct.textContent=budgetRatios[i]+'%';
-    if(amt)amt.textContent=money(Math.round(base*budgetRatios[i]/100));
-  });
-  renderBudgetActuals(base);
-}
-function renderBudgetActuals(base){
-  const root=document.getElementById('budgetActuals');
-  if(!root)return;
-  const now=new Date(),month=now.toISOString().slice(0,7);
-  const monthly=records.filter(r=>r.type==='expense'&&String(r.date||'').slice(0,7)===month);
-  const spent=budgetCategories.map(c=>monthly.filter(r=>c.match.some(k=>String(r.category||'').includes(k))).reduce((s,r)=>s+Number(r.amount||0),0));
-  root.innerHTML=budgetCategories.map((c,i)=>{
-    const limit=base*budgetRatios[i]/100,percent=limit>0?spent[i]/limit*100:0;
-    return `<div class="budget-actual ${percent>100?'over':''}"><span>${c.emoji} ${c.name}｜已支出 ${money(spent[i])}</span><strong>預算 ${money(limit)}</strong><div class="progress"><span style="width:${Math.min(100,percent)}%;background:${percent>100?'#b98783':'#879987'}"></span></div></div>`;
-  }).join('')||'<p class="empty">目前沒有本月支出紀錄。</p>';
-}
-function resetBudgetRatios(){
-  budgetRatios=[25,15,30,10,20];
-  renderBudgetControls();renderBudgetPreview();
-}
-async function loadBudgetPlan(){
-  renderBudgetControls();
-  if(!currentUser){document.getElementById('budgetMessage').textContent='請先登入會員，才能載入及儲存個人預算。';renderBudgetPreview();return;}
-  const {data,error}=await supabaseClient.from('budget_plans').select('*').eq('user_id',currentUser.id).maybeSingle();
-  if(error){document.getElementById('budgetMessage').textContent='讀取預算失敗：'+error.message+'（請先建立 budget_plans 資料表）';renderBudgetPreview();return;}
-  if(data){
-    document.getElementById('budgetMode').value=data.mode||'income';
-    document.getElementById('budgetBase').value=data.base_amount||'';
-    const incoming=data.ratios||{};
-    budgetRatios=budgetCategories.map(c=>Number(incoming[c.key]??0));
-    if(budgetRatios.reduce((a,b)=>a+b,0)!==100)budgetRatios=[25,15,30,10,20];
-    updateBudgetBaseLabel();renderBudgetControls();
-    document.getElementById('budgetMessage').textContent='已載入你上次儲存的預算設定。';
-  }else{
-    document.getElementById('budgetMessage').textContent='尚未設定預算，調整比例後即可儲存。';
-  }
-  budgetPlanLoaded=true;renderBudgetPreview();
-}
-async function saveBudgetPlan(){
-  if(!currentUser){document.getElementById('budgetMessage').textContent='請先登入會員，再儲存預算設定。';openAuth();return;}
-  const base=getBudgetBase(),mode=document.getElementById('budgetMode').value;
-  if(base<=0){document.getElementById('budgetMessage').textContent='請輸入大於 0 的每月金額。';return;}
-  if(budgetRatios.reduce((a,b)=>a+b,0)!==100){document.getElementById('budgetMessage').textContent='比例總和必須為 100%。';return;}
-  const ratios=Object.fromEntries(budgetCategories.map((c,i)=>[c.key,budgetRatios[i]]));
-  const payload={user_id:currentUser.id,mode,base_amount:base,ratios,updated_at:new Date().toISOString()};
-  const {error}=await supabaseClient.from('budget_plans').upsert(payload,{onConflict:'user_id'});
-  document.getElementById('budgetMessage').textContent=error?'儲存失敗：'+error.message:'預算已成功儲存到你的雲端會員帳號！';
-}
-
-supabaseClient.auth.onAuthStateChange((_event,session)=>{
-  currentUser=session?.user||null;
-  updateAccountUI();
-  if(currentUser) setTimeout(()=>loadCloudData(),0);
-  else {records=[];goal=null;renderOverview();renderRecords();renderAnalysis();renderSaving();}
-});
-refreshSession();
-/* 首次開啟若尚未登入，提醒使用者先登入；不會把原本 localStorage 舊資料自動上傳。 */
-</script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 <!-- 頁首：提供品牌名稱與返回首頁按鈕，讓使用者在各功能間容易移動。 -->
@@ -673,6 +499,119 @@ document.getElementById('invoiceForm').addEventListener('submit',async e=>{
   records.unshift({id:data.id,date:data.transaction_date,type:data.type,name:data.note||'',category:data.category||category,amount:Number(data.amount)});renderRecords();renderOverview();renderAnalysis();
   e.target.reset();document.getElementById('invoiceDate').value=invoiceToday();document.getElementById('scanResult').hidden=true;lastQrValue='';setScanStatus('發票已成功存入雲端記帳！');alert('發票記帳成功，已同步到雲端。');
 });
+
+/* 生活預算管理：每位登入會員各自保存一筆預算設定。 */
+const budgetCategories=[
+  {key:'food',name:'食',detail:'餐飲、飲料、食材',emoji:'🍱',color:'#b7a58b',match:['餐飲','飲食','食物','食品','外食','食']},
+  {key:'clothing',name:'衣',detail:'服飾、鞋子、配件',emoji:'👕',color:'#c7a9a1',match:['服飾','衣物','衣','購物']},
+  {key:'housing',name:'住',detail:'房租、水電、生活用品',emoji:'🏠',color:'#91a89a',match:['房租','水電','居家','生活','住']},
+  {key:'transport',name:'行',detail:'交通、油錢、車資',emoji:'🚌',color:'#a3afc0',match:['交通','油錢','行']},
+  {key:'entertainment',name:'娛樂',detail:'休閒、娛樂、旅遊',emoji:'🎮',color:'#b5a8bf',match:['娛樂','休閒','旅遊']}
+];
+let budgetRatios=[25,15,30,10,20];
+let budgetPlanLoaded=false;
+function updateBudgetBaseLabel(){
+  const mode=document.getElementById('budgetMode').value;
+  document.getElementById('budgetBaseLabel').textContent=mode==='income'?'每月收入（新台幣）':'每月可用生活預算（新台幣）';
+  renderBudgetPreview();
+}
+function rebalanceBudget(changedIndex,newValue){
+  const next=budgetRatios.slice();
+  const value=Math.max(0,Math.min(100,Math.round(Number(newValue)||0)));
+  const remaining=100-value;
+  const others=next.map((v,i)=>i===changedIndex?0:v);
+  const otherTotal=others.reduce((a,b)=>a+b,0);
+  next[changedIndex]=value;
+  let assigned=0;
+  const otherIndexes=next.map((_,i)=>i).filter(i=>i!==changedIndex);
+  otherIndexes.forEach((i,pos)=>{
+    let part;
+    if(pos===otherIndexes.length-1) part=remaining-assigned;
+    else if(otherTotal>0) part=Math.floor(remaining*others[i]/otherTotal);
+    else part=Math.floor(remaining/otherIndexes.length);
+    next[i]=part;assigned+=part;
+  });
+  budgetRatios=next;
+  renderBudgetControls();
+  renderBudgetPreview();
+}
+function renderBudgetControls(){
+  const root=document.getElementById('budgetSliders');
+  if(!root)return;
+  root.innerHTML=budgetCategories.map((c,i)=>`<div class="budget-item">
+    <div class="budget-item-head"><strong>${c.emoji} ${c.name}</strong><strong id="budgetPct${i}">${budgetRatios[i]}%</strong></div>
+    <input aria-label="${c.name}預算比例" type="range" min="0" max="100" step="1" value="${budgetRatios[i]}" oninput="rebalanceBudget(${i},this.value)">
+    <div class="budget-item-meta"><span>${c.detail}</span><span id="budgetMoney${i}">$0</span></div>
+  </div>`).join('');
+}
+function getBudgetBase(){
+  const raw=Number(document.getElementById('budgetBase')?.value||0);
+  return Number.isFinite(raw)&&raw>0?raw:0;
+}
+function renderBudgetPreview(){
+  const base=getBudgetBase();
+  const total=budgetRatios.reduce((a,b)=>a+b,0);
+  const totalEl=document.getElementById('budgetTotalPercent');
+  if(!totalEl)return;
+  totalEl.textContent=total+'%';
+  const bar=document.getElementById('budgetBar');
+  bar.innerHTML=budgetCategories.map((c,i)=>`<span title="${c.name} ${budgetRatios[i]}%" style="width:${budgetRatios[i]}%;background:${c.color}"></span>`).join('');
+  document.getElementById('budgetBaseSummary').textContent=money(base);
+  document.getElementById('budgetBreakdown').innerHTML=budgetCategories.map((c,i)=>{
+    const amount=Math.round(base*budgetRatios[i]/100);
+    return `<div class="budget-breakdown-row"><span>${c.emoji} ${c.name}（${budgetRatios[i]}%）</span><strong>${money(amount)}</strong></div>`;
+  }).join('');
+  budgetCategories.forEach((c,i)=>{
+    const pct=document.getElementById('budgetPct'+i),amt=document.getElementById('budgetMoney'+i);
+    if(pct)pct.textContent=budgetRatios[i]+'%';
+    if(amt)amt.textContent=money(Math.round(base*budgetRatios[i]/100));
+  });
+  renderBudgetActuals(base);
+}
+function renderBudgetActuals(base){
+  const root=document.getElementById('budgetActuals');
+  if(!root)return;
+  const now=new Date(),month=now.toISOString().slice(0,7);
+  const monthly=records.filter(r=>r.type==='expense'&&String(r.date||'').slice(0,7)===month);
+  const spent=budgetCategories.map(c=>monthly.filter(r=>c.match.some(k=>String(r.category||'').includes(k))).reduce((s,r)=>s+Number(r.amount||0),0));
+  root.innerHTML=budgetCategories.map((c,i)=>{
+    const limit=base*budgetRatios[i]/100,percent=limit>0?spent[i]/limit*100:0;
+    return `<div class="budget-actual ${percent>100?'over':''}"><span>${c.emoji} ${c.name}｜已支出 ${money(spent[i])}</span><strong>預算 ${money(limit)}</strong><div class="progress"><span style="width:${Math.min(100,percent)}%;background:${percent>100?'#b98783':'#879987'}"></span></div></div>`;
+  }).join('')||'<p class="empty">目前沒有本月支出紀錄。</p>';
+}
+function resetBudgetRatios(){
+  budgetRatios=[25,15,30,10,20];
+  renderBudgetControls();renderBudgetPreview();
+}
+async function loadBudgetPlan(){
+  renderBudgetControls();
+  if(!currentUser){document.getElementById('budgetMessage').textContent='請先登入會員，才能載入及儲存個人預算。';renderBudgetPreview();return;}
+  const {data,error}=await supabaseClient.from('budget_plans').select('*').eq('user_id',currentUser.id).maybeSingle();
+  if(error){document.getElementById('budgetMessage').textContent='讀取預算失敗：'+error.message+'（請先建立 budget_plans 資料表）';renderBudgetPreview();return;}
+  if(data){
+    document.getElementById('budgetMode').value=data.mode||'income';
+    document.getElementById('budgetBase').value=data.base_amount||'';
+    const incoming=data.ratios||{};
+    budgetRatios=budgetCategories.map(c=>Number(incoming[c.key]??0));
+    if(budgetRatios.reduce((a,b)=>a+b,0)!==100)budgetRatios=[25,15,30,10,20];
+    updateBudgetBaseLabel();renderBudgetControls();
+    document.getElementById('budgetMessage').textContent='已載入你上次儲存的預算設定。';
+  }else{
+    document.getElementById('budgetMessage').textContent='尚未設定預算，調整比例後即可儲存。';
+  }
+  budgetPlanLoaded=true;renderBudgetPreview();
+}
+async function saveBudgetPlan(){
+  if(!currentUser){document.getElementById('budgetMessage').textContent='請先登入會員，再儲存預算設定。';openAuth();return;}
+  const base=getBudgetBase(),mode=document.getElementById('budgetMode').value;
+  if(base<=0){document.getElementById('budgetMessage').textContent='請輸入大於 0 的每月金額。';return;}
+  if(budgetRatios.reduce((a,b)=>a+b,0)!==100){document.getElementById('budgetMessage').textContent='比例總和必須為 100%。';return;}
+  const ratios=Object.fromEntries(budgetCategories.map((c,i)=>[c.key,budgetRatios[i]]));
+  const payload={user_id:currentUser.id,mode,base_amount:base,ratios,updated_at:new Date().toISOString()};
+  const {error}=await supabaseClient.from('budget_plans').upsert(payload,{onConflict:'user_id'});
+  document.getElementById('budgetMessage').textContent=error?'儲存失敗：'+error.message:'預算已成功儲存到你的雲端會員帳號！';
+}
+
 
 supabaseClient.auth.onAuthStateChange((_event,session)=>{
   currentUser=session?.user||null;
